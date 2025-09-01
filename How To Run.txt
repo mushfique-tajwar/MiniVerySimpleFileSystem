@@ -1,0 +1,5 @@
+gcc -O2 -std=c17 -Wall -Wextra mkfs_builder_skeleton.c -o mkfs_builder
+gcc -O2 -std=c17 -Wall -Wextra mkfs_adder_skeleton.c -o mkfs_adder
+
+./mkfs_builder --image fs.img --size-kib 256 --inodes 128
+./mkfs_adder --input fs.img --output fs_with_file.img --file file_2.txt
