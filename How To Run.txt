@@ -1,5 +1,13 @@
-gcc -O2 -std=c17 -Wall -Wextra mkfs_builder_skeleton.c -o mkfs_builder
-gcc -O2 -std=c17 -Wall -Wextra mkfs_adder_skeleton.c -o mkfs_adder
+Compile:
+
+gcc -o mkfs_builder mkfs_builder.c
+gcc -o mkfs_adder mkfs_adder.c 
+
+Run in CLI:
 
 ./mkfs_builder --image fs.img --size-kib 256 --inodes 128
 ./mkfs_adder --input fs.img --output fs_with_file.img --file file_2.txt
+
+Debugging (Metadata in Binary form):
+
+xxd -l 256 test.img | head
