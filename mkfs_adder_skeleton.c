@@ -117,12 +117,15 @@ static void usage(const char* prog){
     fprintf(stderr, "Usage: %s --input <in.img> --output <out.img> --file <path>\n", prog);
 }
 
-static int parse_u64(const char* s, uint64_t* out){ if(!s) return -1; char* e; errno=0; unsigned long long v=strtoull(s,&e,10); if(errno||*e) return -1; *out=v; return 0; }
-
 static void set_bit(uint8_t* bm, uint64_t idx){ bm[idx/8] |= (uint8_t)(1u<<(idx%8)); }
 
 static int find_first_zero_bit(uint8_t* bm, uint64_t max_bits){
-    for(uint64_t i=0;i<max_bits;i++) if( (bm[i/8] & (1u<<(i%8))) == 0) return (int)i; return -1;
+    for(uint64_t i=0;i<max_bits;i++){
+        if( (bm[i/8] & (1u<<(i%8))) == 0){
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
 int main(int argc, char** argv) {
@@ -212,7 +215,9 @@ int main(int argc, char** argv) {
             dirblock[i].type = 1; // file
             memset(dirblock[i].name,0,sizeof(dirblock[i].name));
             const char* base = strrchr(filepath,'/'); base = base? base+1: filepath;
-            strncpy(dirblock[i].name, base, sizeof(dirblock[i].name));
+            size_t blen = strlen(base);
+            if(blen > sizeof(dirblock[i].name)-1) blen = sizeof(dirblock[i].name)-1; // leave room for optional null
+            memcpy(dirblock[i].name, base, blen);
             dirent_checksum_finalize(&dirblock[i]);
             placed=1; break;
         }
@@ -221,6 +226,10 @@ int main(int argc, char** argv) {
     root.links += 1; // new file's .. reference increments root link count
     inode_crc_finalize(&root); memcpy(inode_table + 0*INODE_SIZE, &root, sizeof(root));
 
+    // update superblock modified time & checksum before writing out
+    sb.mtime_epoch = (uint64_t)time(NULL);
+    superblock_crc_finalize(&sb);
+    memcpy(img, &sb, sizeof(sb));
     // write output image
     FILE* fo=fopen(output,"wb"); if(!fo){ fprintf(stderr,"Cannot open output %s: %s\n", output,strerror(errno)); return 9; }
     if(fwrite(img,1,fsz,fo)!=(size_t)fsz){ fprintf(stderr,"Write output failed\n"); return 9; }

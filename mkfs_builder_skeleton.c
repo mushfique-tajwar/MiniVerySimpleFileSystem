@@ -124,7 +124,18 @@ static void usage(const char* prog){
 }
 
 static int parse_u64(const char* s, uint64_t* out){
-    if(!s||!*s) return -1; char* end=NULL; errno=0; unsigned long long v = strtoull(s,&end,10); if(errno||*end!='\0') return -1; *out=(uint64_t)v; return 0; }
+    if(!s || !*s) {
+        return -1;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if(errno || *end != '\0') {
+        return -1;
+    }
+    *out = (uint64_t)v;
+    return 0;
+}
 
 static void set_bit(uint8_t* bm, uint64_t idx){
     bm[idx/8] |= (uint8_t)(1u << (idx%8));
