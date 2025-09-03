@@ -6,7 +6,16 @@ gcc -o mkfs_adder mkfs_adder.c
 Run in CLI:
 
 ./mkfs_builder --image fs.img --size-kib 256 --inodes 128
-./mkfs_adder --input fs.img --output fs_with_file.img --file file_2.txt
+
+Chaining Files:
+
+./mkfs_adder --input fs.img --output fs_with_f2.img --file file_2.txt
+
+./mkfs_adder --input fs.img --output fs_with_f2_f18.img --file file_18.txt
+
+./mkfs_adder --input fs.img --output fs_with_f2_f18_f29.img --file file_29.txt
+
+./mkfs_adder --input fs.img --output fs_with_f2_f18_f29_f31.img --file file_31.txt
 
 Debugging (Metadata in Binary form):
 
