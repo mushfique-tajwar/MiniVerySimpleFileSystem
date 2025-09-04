@@ -11,16 +11,12 @@ Chaining Files:
 
     ./mkfs_adder --input fs.img --output fs_with_f2.img --file file_2.txt
 
-    ./mkfs_adder --input fs.img --output fs_with_f2_f18.img --file file_18.txt
+    ./mkfs_adder --input fs_with_f2.img --output fs_with_f2_f18.img --file file_18.txt
 
-    ./mkfs_adder --input fs.img --output fs_with_f2_f18_f29.img --file file_29.txt
+    ./mkfs_adder --input fs_with_f2_f18.img --output fs_with_f2_f18_f29.img --file file_29.txt
 
-    ./mkfs_adder --input fs.img --output fs_with_f2_f18_f29_f31.img --file file_31.txt
+    ./mkfs_adder --input fs_with_f2_f18_f29.img --output fs_with_f2_f18_f29_f31.img --file file_31.txt
 
 Debugging (Metadata in Binary form):
 
-    xxd -l 256 fs.img | head
-    xxd -l 256 fs_with_f2.img | head
-    xxd -l 256 fs_with_f2_f18.img | head
-    xxd -l 256 fs_with_f2_f18_f29.img | head
-    xxd -l 256 fs_with_f2_f18_f29_f31.img | head
+    hexdump -C fs_with_f2_f18_f29_f31.img
