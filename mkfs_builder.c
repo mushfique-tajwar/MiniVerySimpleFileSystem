@@ -56,7 +56,7 @@ typedef struct {
     uint32_t reserved_0;    // 0
     uint32_t reserved_1;    // 0
     uint32_t reserved_2;    // 0
-    uint32_t proj_id;       // group id (reuse gid or 0)
+    uint32_t proj_id;       // group id = 4 used in the main
     uint32_t uid16_gid16;   // 0
     uint64_t xattr_ptr;     // 0
     uint64_t inode_crc;     // low 4 bytes store crc32 of bytes [0..119]; high 4 bytes 0
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
     inode_t root; memset(&root,0,sizeof(root));
     root.mode = 0040000; // directory
     root.links = 2; // . and ..
-    root.uid = 0; root.gid=0; root.proj_id=0; root.uid16_gid16=0; root.xattr_ptr=0;
+    root.uid = 0; root.gid=0; root.proj_id=4; root.uid16_gid16=0; root.xattr_ptr=0;
     root.size_bytes = 128; // two entries
     root.atime = root.mtime = root.ctime = sb.mtime_epoch;
     root.direct[0] = (uint32_t)sb.data_region_start; // first data block absolute
@@ -225,16 +225,35 @@ int main(int argc, char** argv) {
     memset(&de,0,sizeof(de)); de.inode_no=ROOT_INO; de.type=2; memset(de.name,0,sizeof(de.name)); de.name[0]='.'; de.name[1]='.'; dirent_checksum_finalize(&de); memcpy(data_region+64, &de, sizeof(de));
     // rest already zeroed
 
-    FILE* f = fopen(image_path,"wb");
+    FILE* f = fopen(image_path,"wb+");
     if(!f){ fprintf(stderr,"Cannot open output image %s: %s\n", image_path, strerror(errno)); return 6; }
+    // Pre-size the file: seek to last byte then write a zero so random seeks are safe
+    if(fseek(f, (long)(total_blocks*BS) - 1, SEEK_SET)!=0){ fprintf(stderr,"fseek size prep failed\n"); return 7; }
+    if(fwrite("\0",1,1,f)!=1){ fprintf(stderr,"size extend write failed\n"); return 7; }
 
-    // write superblock padded to 1 block
+    // helper lambda-like macro to write a full block-aligned region
+    #define WRITE_AT_BLOCK(block_index, buf, len_desc, expected_bytes) do { \
+        if(fseek(f, (long)(block_index)*BS, SEEK_SET)!=0){ fprintf(stderr,"fseek failed for %s (block %llu)\n", len_desc, (unsigned long long)(block_index)); return 7; } \
+        if(fwrite(buf,1,expected_bytes,f)!=(size_t)expected_bytes){ fprintf(stderr,"fwrite failed for %s\n", len_desc); return 7; } \
+    } while(0)
+
+    // superblock (single block)
     uint8_t sb_block[BS]; memset(sb_block,0,sizeof(sb_block)); memcpy(sb_block,&sb,sizeof(sb));
-    if(fwrite(sb_block,1,BS,f)!=BS){ fprintf(stderr,"Write error superblock\n"); return 7; }
-    if(fwrite(inode_bitmap,1,BS,f)!=BS){ fprintf(stderr,"Write error inode bitmap\n"); return 7; }
-    if(fwrite(data_bitmap,1,BS,f)!=BS){ fprintf(stderr,"Write error data bitmap\n"); return 7; }
-    if(fwrite(inode_table,1,it_bytes,f)!=it_bytes){ fprintf(stderr,"Write error inode table\n"); return 7; }
-    if(fwrite(data_region,1,data_bytes,f)!=data_bytes){ fprintf(stderr,"Write error data region\n"); return 7; }
+    WRITE_AT_BLOCK(0, sb_block, "superblock", BS);
+    // inode bitmap
+    WRITE_AT_BLOCK(sb.inode_bitmap_start, inode_bitmap, "inode bitmap", BS);
+    // data bitmap
+    WRITE_AT_BLOCK(sb.data_bitmap_start, data_bitmap, "data bitmap", BS);
+    // inode table blocks (may span multiple blocks); write sequential blocks from the buffer
+    for(uint64_t b=0;b<inode_table_blocks;b++){
+        WRITE_AT_BLOCK(sb.inode_table_start + b, inode_table + b*BS, "inode table block", BS);
+    }
+    // data region blocks
+    for(uint64_t b=0;b<data_region_blocks;b++){
+        WRITE_AT_BLOCK(sb.data_region_start + b, data_region + b*BS, "data region block", BS);
+    }
+    #undef WRITE_AT_BLOCK
+    fflush(f);
     fclose(f);
 
     // clean up

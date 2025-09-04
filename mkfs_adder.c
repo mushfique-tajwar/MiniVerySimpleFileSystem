@@ -140,22 +140,29 @@ int main(int argc, char** argv) {
     }
     if(!input||!output||!filepath){ usage(argv[0]); return 2; }
 
-    // read entire input file into memory
-    FILE* fi=fopen(input,"rb"); if(!fi){ fprintf(stderr,"Cannot open input %s: %s\n", input,strerror(errno)); return 3; }
-    if(fseek(fi,0,SEEK_END)!=0){ fprintf(stderr,"seek fail\n"); return 3; }
-    long fsz=ftell(fi); if(fsz<0){ fprintf(stderr,"size fail\n"); return 3; } rewind(fi);
-    uint8_t* img=malloc(fsz); if(!img){ fprintf(stderr,"OOM\n"); return 3; }
-    if(fread(img,1,fsz,fi)!=(size_t)fsz){ fprintf(stderr,"read fail\n"); return 3; }
-    fclose(fi);
+    // Copy input to output first (preserving original) using streaming I/O
+    {
+        FILE* src=fopen(input,"rb"); if(!src){ fprintf(stderr,"Cannot open input %s: %s\n", input,strerror(errno)); return 3; }
+        FILE* dst=fopen(output,"wb+"); if(!dst){ fprintf(stderr,"Cannot open output %s: %s\n", output,strerror(errno)); fclose(src); return 3; }
+        char buf[1<<15]; size_t r; while((r=fread(buf,1,sizeof(buf),src))>0){ if(fwrite(buf,1,r,dst)!=r){ fprintf(stderr,"Copy write error\n"); fclose(src); fclose(dst); return 3; } }
+        fclose(src); fflush(dst); fclose(dst);
+    }
+    FILE* fimg = fopen(output,"rb+"); if(!fimg){ fprintf(stderr,"Reopen output failed %s\n", output); return 3; }
 
-    if(fsz < BS){ fprintf(stderr,"Image too small\n"); return 4; }
-    superblock_t sb; memcpy(&sb, img, sizeof(sb));
+    // Read superblock directly from file
+    superblock_t sb; if(fseek(fimg,0,SEEK_SET)!=0 || fread(&sb,1,sizeof(sb),fimg)!=sizeof(sb)){ fprintf(stderr,"Read superblock failed\n"); return 4; }
     if(sb.magic != 0x4D565346u || sb.block_size!=BS){ fprintf(stderr,"Bad superblock\n"); return 4; }
 
-    uint8_t* inode_bitmap = img + sb.inode_bitmap_start * BS;
-    uint8_t* data_bitmap  = img + sb.data_bitmap_start * BS;
-    uint8_t* inode_table  = img + sb.inode_table_start * BS;
-    uint8_t* data_region  = img + sb.data_region_start * BS;
+    // Load bitmaps and inode table blocks we will modify (root block + new inode)
+    uint8_t inode_bitmap_block[BS];
+    uint8_t data_bitmap_block[BS];
+    if(fseek(fimg, (long)sb.inode_bitmap_start*BS, SEEK_SET)!=0 || fread(inode_bitmap_block,1,BS,fimg)!=BS){ fprintf(stderr,"Read inode bitmap failed\n"); return 4; }
+    if(fseek(fimg, (long)sb.data_bitmap_start*BS, SEEK_SET)!=0 || fread(data_bitmap_block,1,BS,fimg)!=BS){ fprintf(stderr,"Read data bitmap failed\n"); return 4; }
+    // inode table into memory (only modified entries; we read full for simplicity)
+    size_t inode_table_bytes = sb.inode_table_blocks * BS;
+    uint8_t* inode_table = malloc(inode_table_bytes); if(!inode_table){ fprintf(stderr,"OOM inode table\n"); return 5; }
+    if(fseek(fimg, (long)sb.inode_table_start*BS, SEEK_SET)!=0 || fread(inode_table,1,inode_table_bytes,fimg)!=inode_table_bytes){ fprintf(stderr,"Read inode table failed\n"); return 5; }
+    // We'll write data blocks in place later
 
     // stat the file to add
     struct stat st; if(stat(filepath,&st)!=0){ fprintf(stderr,"Cannot stat %s: %s\n", filepath,strerror(errno)); return 5; }
@@ -169,9 +176,9 @@ int main(int argc, char** argv) {
     fclose(ff);
 
     // allocate an inode
-    int ino_idx = find_first_zero_bit(inode_bitmap, sb.inode_count); // returns index (0-based)
+    int ino_idx = find_first_zero_bit(inode_bitmap_block, sb.inode_count); // returns index (0-based)
     if(ino_idx<0){ fprintf(stderr,"No free inodes\n"); return 6; }
-    set_bit(inode_bitmap, ino_idx);
+    set_bit(inode_bitmap_block, ino_idx);
     uint32_t inode_no = (uint32_t)(ino_idx+1); // 1-indexed
 
     // allocate data blocks
@@ -179,10 +186,15 @@ int main(int argc, char** argv) {
     if(needed_blocks > 12) needed_blocks = 12; // truncate if oversized
     uint32_t dblocks[12]={0}; size_t allocated=0;
     for(size_t i=0;i<sb.data_region_blocks && allocated<needed_blocks;i++){
-        if( (data_bitmap[i/8] & (1u<<(i%8)))==0){ set_bit(data_bitmap,i); dblocks[allocated]=(uint32_t)(sb.data_region_start + i); // absolute block number
-            // copy data
+        if( (data_bitmap_block[i/8] & (1u<<(i%8)))==0){
+            set_bit(data_bitmap_block,i);
+            dblocks[allocated]=(uint32_t)(sb.data_region_start + i); // absolute block number
+            // copy data directly to file
+            if(fseek(fimg, (long)( (sb.data_region_start + i) * BS ), SEEK_SET)!=0){ fprintf(stderr,"data block seek fail\n"); return 7; }
             size_t copy = (file_size > BS)? BS : file_size;
-            memcpy(data_region + i*BS, filebuf + allocated*BS, copy);
+            if(fwrite(filebuf + allocated*BS,1,copy,fimg)!=copy){ fprintf(stderr,"data block write fail\n"); return 7; }
+            // zero remainder of block if partial
+            if(copy < BS){ size_t zlen = BS - copy; static uint8_t zbuf[BS]; if(fwrite(zbuf,1,zlen,fimg)!=zlen){ fprintf(stderr,"pad write fail\n"); return 7; } }
             file_size -= copy;
             allocated++;
         }
@@ -194,7 +206,7 @@ int main(int argc, char** argv) {
     inode_t ino; memset(&ino,0,sizeof(ino));
     ino.mode = 0100000; // file
     ino.links = 1; // root dir entry
-    ino.uid=0; ino.gid=0; ino.proj_id=0; ino.uid16_gid16=0; ino.xattr_ptr=0;
+    ino.uid=0; ino.gid=0; ino.proj_id=4; ino.uid16_gid16=0; ino.xattr_ptr=0;
     // recompute size from allocated blocks (approx original minus truncation)
     ino.size_bytes = (uint64_t)((allocated-1)*BS + ( (st.st_size % BS)? (st.st_size % BS): (allocated?BS:0)) );
     ino.atime = ino.mtime = ino.ctime = (uint64_t)time(NULL);
@@ -207,7 +219,10 @@ int main(int argc, char** argv) {
     uint32_t root_first_block_abs = root.direct[0];
     if(root_first_block_abs != sb.data_region_start){ /* still ok, just compute offset */ }
     uint64_t root_block_index = root_first_block_abs - sb.data_region_start; // index within data region
-    dirent64_t* dirblock = (dirent64_t*)(data_region + root_block_index*BS);
+    // Read only that root directory block
+    dirent64_t dirblock_local[BS/sizeof(dirent64_t)];
+    if(fseek(fimg, (long)( (sb.data_region_start + root_block_index) * BS ), SEEK_SET)!=0 || fread(dirblock_local,1,BS,fimg)!=BS){ fprintf(stderr,"Read root dir block failed\n"); return 8; }
+    dirent64_t* dirblock = dirblock_local;
     int placed=0;
     for(int i=0;i< (int)(BS/sizeof(dirent64_t)); i++){
         if(dirblock[i].inode_no==0){
@@ -223,18 +238,24 @@ int main(int argc, char** argv) {
         }
     }
     if(!placed){ fprintf(stderr,"Root directory full (single block limit)\n"); return 8; }
+    // write updated directory block back
+    if(fseek(fimg, (long)( (sb.data_region_start + root_block_index) * BS ), SEEK_SET)!=0 || fwrite(dirblock,1,BS,fimg)!=BS){ fprintf(stderr,"Write root dir block failed\n"); return 8; }
     root.links += 1; // new file's .. reference increments root link count
     inode_crc_finalize(&root); memcpy(inode_table + 0*INODE_SIZE, &root, sizeof(root));
 
     // update superblock modified time & checksum before writing out
     sb.mtime_epoch = (uint64_t)time(NULL);
     superblock_crc_finalize(&sb);
-    memcpy(img, &sb, sizeof(sb));
-    // write output image
-    FILE* fo=fopen(output,"wb"); if(!fo){ fprintf(stderr,"Cannot open output %s: %s\n", output,strerror(errno)); return 9; }
-    if(fwrite(img,1,fsz,fo)!=(size_t)fsz){ fprintf(stderr,"Write output failed\n"); return 9; }
-    fclose(fo);
+    // write back bitmaps
+    if(fseek(fimg, (long)sb.inode_bitmap_start*BS, SEEK_SET)!=0 || fwrite(inode_bitmap_block,1,BS,fimg)!=BS){ fprintf(stderr,"Write inode bitmap failed\n"); return 9; }
+    if(fseek(fimg, (long)sb.data_bitmap_start*BS, SEEK_SET)!=0 || fwrite(data_bitmap_block,1,BS,fimg)!=BS){ fprintf(stderr,"Write data bitmap failed\n"); return 9; }
+    // write modified inode table (full for simplicity)
+    if(fseek(fimg, (long)sb.inode_table_start*BS, SEEK_SET)!=0 || fwrite(inode_table,1,inode_table_bytes,fimg)!=inode_table_bytes){ fprintf(stderr,"Write inode table failed\n"); return 9; }
+    // write updated superblock (with new mtime + checksum)
+    if(fseek(fimg,0,SEEK_SET)!=0 || fwrite(&sb,1,sizeof(sb),fimg)!=sizeof(sb)){ fprintf(stderr,"Write superblock failed\n"); return 9; }
+    fflush(fimg);
+    fclose(fimg);
     fprintf(stdout, "Added file to image as inode %u -> %s\n", inode_no, output);
-    free(img);
+    free(inode_table);
     return 0;
 }
